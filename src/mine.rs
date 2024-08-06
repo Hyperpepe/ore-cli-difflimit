@@ -44,13 +44,18 @@ impl Miner {
 
             // Run drillx
             let config = get_config(&self.rpc_client).await;
+            // let solution = Self::find_hash_par(
+            //     proof,
+            //     18, // 目标难度
+            //     args.threads,
+            // ).await;
+            let max_duration = std::time::Duration::new(120, 0); // 2分钟
             let solution = Self::find_hash_par(
                 proof,
-                cutoff_time,
+                18, // 目标难度
                 args.threads,
-                config.min_difficulty as u32,
-            )
-            .await;
+                max_duration, // 最大时间
+            ).await;
 
             // Submit most difficult hash
             let mut compute_budget = 500_000;
@@ -71,91 +76,180 @@ impl Miner {
         }
     }
 
+    // async fn find_hash_par(
+    //     proof: Proof,
+    //     cutoff_time: u64,
+    //     threads: u64,
+    //     min_difficulty: u32,
+    // ) -> Solution {
+    //     // Dispatch job to each thread
+    //     let progress_bar = Arc::new(spinner::new_progress_bar());
+    //     progress_bar.set_message("Mining...");
+    //     let handles: Vec<_> = (0..threads)
+    //         .map(|i| {
+    //             std::thread::spawn({
+    //                 let proof = proof.clone();
+    //                 let progress_bar = progress_bar.clone();
+    //                 let mut memory = equix::SolverMemory::new();
+    //                 move || {
+    //                     let timer = Instant::now();
+    //                     let mut nonce = u64::MAX.saturating_div(threads).saturating_mul(i);
+    //                     let mut best_nonce = nonce;
+    //                     let mut best_difficulty = 0;
+    //                     let mut best_hash = Hash::default();
+    //                     loop {
+    //                         // Create hash
+    //                         if let Ok(hx) = drillx::hash_with_memory(
+    //                             &mut memory,
+    //                             &proof.challenge,
+    //                             &nonce.to_le_bytes(),
+    //                         ) {
+    //                             let difficulty = hx.difficulty();
+    //                             if difficulty.gt(&best_difficulty) {
+    //                                 best_nonce = nonce;
+    //                                 best_difficulty = difficulty;
+    //                                 best_hash = hx;
+    //                             }
+    //                         }
+    //
+    //                         // Exit if time has elapsed
+    //                         if nonce % 100 == 0 {
+    //                             if timer.elapsed().as_secs().ge(&cutoff_time) {
+    //                                 if best_difficulty.gt(&min_difficulty) {
+    //                                     // Mine until min difficulty has been met
+    //                                     break;
+    //                                 }
+    //                             } else if i == 0 {
+    //                                 progress_bar.set_message(format!(
+    //                                     "Mining... ({} sec remaining)",
+    //                                     cutoff_time.saturating_sub(timer.elapsed().as_secs()),
+    //                                 ));
+    //                             }
+    //                         }
+    //
+    //                         // Increment nonce
+    //                         nonce += 1;
+    //                     }
+    //
+    //                     // Return the best nonce
+    //                     (best_nonce, best_difficulty, best_hash)
+    //                 }
+    //             })
+    //         })
+    //         .collect();
+    //
+    //     // Join handles and return best nonce
+    //     let mut best_nonce = 0;
+    //     let mut best_difficulty = 0;
+    //     let mut best_hash = Hash::default();
+    //     for h in handles {
+    //         if let Ok((nonce, difficulty, hash)) = h.join() {
+    //             if difficulty > best_difficulty {
+    //                 best_difficulty = difficulty;
+    //                 best_nonce = nonce;
+    //                 best_hash = hash;
+    //             }
+    //         }
+    //     }
+    //
+    //     // Update log
+    //     progress_bar.finish_with_message(format!(
+    //         "Best hash: {} (difficulty: {})",
+    //         bs58::encode(best_hash.h).into_string(),
+    //         best_difficulty
+    //     ));
+    //
+    //     Solution::new(best_hash.d, best_nonce.to_le_bytes())
+    // }
+
     async fn find_hash_par(
-        proof: Proof,
-        cutoff_time: u64,
-        threads: u64,
-        min_difficulty: u32,
-    ) -> Solution {
-        // Dispatch job to each thread
-        let progress_bar = Arc::new(spinner::new_progress_bar());
-        progress_bar.set_message("Mining...");
-        let handles: Vec<_> = (0..threads)
-            .map(|i| {
-                std::thread::spawn({
-                    let proof = proof.clone();
-                    let progress_bar = progress_bar.clone();
-                    let mut memory = equix::SolverMemory::new();
-                    move || {
-                        let timer = Instant::now();
-                        let mut nonce = u64::MAX.saturating_div(threads).saturating_mul(i);
-                        let mut best_nonce = nonce;
-                        let mut best_difficulty = 0;
-                        let mut best_hash = Hash::default();
-                        loop {
-                            // Create hash
-                            if let Ok(hx) = drillx::hash_with_memory(
-                                &mut memory,
-                                &proof.challenge,
-                                &nonce.to_le_bytes(),
-                            ) {
-                                let difficulty = hx.difficulty();
-                                if difficulty.gt(&best_difficulty) {
-                                    best_nonce = nonce;
-                                    best_difficulty = difficulty;
-                                    best_hash = hx;
-                                }
+    proof: Proof,
+    target_difficulty: u32, // 目标难度
+    threads: u64,
+    max_duration: std::time::Duration, // 最大时间
+) -> Solution {
+    // Dispatch job to each thread
+    let progress_bar = Arc::new(spinner::new_progress_bar());
+    progress_bar.set_message("Mining...");
+    let start_time = Instant::now(); // 记录开始时间
+    let handles: Vec<_> = (0..threads)
+        .map(|i| {
+            std::thread::spawn({
+                let proof = proof.clone();
+                let progress_bar = progress_bar.clone();
+                let mut memory = equix::SolverMemory::new();
+                move || {
+                    let mut nonce = u64::MAX.saturating_div(threads).saturating_mul(i);
+                    let mut best_nonce = nonce;
+                    let mut best_difficulty = 0;
+                    let mut best_hash = Hash::default();
+                    loop {
+                        // Create hash
+                        if let Ok(hx) = drillx::hash_with_memory(
+                            &mut memory,
+                            &proof.challenge,
+                            &nonce.to_le_bytes(),
+                        ) {
+                            let difficulty = hx.difficulty();
+                            if difficulty.gt(&best_difficulty) {
+                                best_nonce = nonce;
+                                best_difficulty = difficulty;
+                                best_hash = hx;
                             }
 
-                            // Exit if time has elapsed
-                            if nonce % 100 == 0 {
-                                if timer.elapsed().as_secs().ge(&cutoff_time) {
-                                    if best_difficulty.gt(&min_difficulty) {
-                                        // Mine until min difficulty has been met
-                                        break;
-                                    }
-                                } else if i == 0 {
-                                    progress_bar.set_message(format!(
-                                        "Mining... ({} sec remaining)",
-                                        cutoff_time.saturating_sub(timer.elapsed().as_secs()),
-                                    ));
-                                }
+                            // 检查是否达到目标难度
+                            if best_difficulty >= target_difficulty {
+                                break;
                             }
-
-                            // Increment nonce
-                            nonce += 1;
                         }
 
-                        // Return the best nonce
-                        (best_nonce, best_difficulty, best_hash)
-                    }
-                })
-            })
-            .collect();
+                        // 检查是否超过最大时间
+                        if start_time.elapsed() >= max_duration {
+                            break;
+                        }
 
-        // Join handles and return best nonce
-        let mut best_nonce = 0;
-        let mut best_difficulty = 0;
-        let mut best_hash = Hash::default();
-        for h in handles {
-            if let Ok((nonce, difficulty, hash)) = h.join() {
-                if difficulty > best_difficulty {
-                    best_difficulty = difficulty;
-                    best_nonce = nonce;
-                    best_hash = hash;
+                        // 显示当前进度
+                        if nonce % 100 == 0 && i == 0 {
+                            progress_bar.set_message(format!(
+                                "Mining... (Best difficulty: {})",
+                                best_difficulty
+                            ));
+                        }
+
+                        // Increment nonce
+                        nonce += 1;
+                    }
+
+                    // Return the best nonce
+                    (best_nonce, best_difficulty, best_hash)
                 }
+            })
+        })
+        .collect();
+
+    // Join handles and return best nonce
+    let mut best_nonce = 0;
+    let mut best_difficulty = 0;
+    let mut best_hash = Hash::default();
+    for h in handles {
+        if let Ok((nonce, difficulty, hash)) = h.join() {
+            if difficulty > best_difficulty {
+                best_difficulty = difficulty;
+                best_nonce = nonce;
+                best_hash = hash;
             }
         }
-
-        // Update log
-        progress_bar.finish_with_message(format!(
-            "Best hash: {} (difficulty: {})",
-            bs58::encode(best_hash.h).into_string(),
-            best_difficulty
-        ));
-
-        Solution::new(best_hash.d, best_nonce.to_le_bytes())
     }
+
+    // Update log
+    progress_bar.finish_with_message(format!(
+        "Best hash: {} (difficulty: {})",
+        bs58::encode(best_hash.h).into_string(),
+        best_difficulty
+    ));
+
+    Solution::new(best_hash.d, best_nonce.to_le_bytes())
+}
 
     pub fn check_num_cores(&self, threads: u64) {
         // Check num threads
