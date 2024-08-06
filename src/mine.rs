@@ -49,10 +49,10 @@ impl Miner {
             //     18, // 目标难度
             //     args.threads,
             // ).await;
-            let max_duration = std::time::Duration::new(120, 0); // 2分钟
+            let max_duration = std::time::Duration::new(600, 0); // 2分钟
             let solution = Self::find_hash_par(
                 proof,
-                18, // 目标难度
+                24, // 目标难度
                 args.threads,
                 max_duration, // 最大时间
             ).await;
